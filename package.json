@@ -1,0 +1,17 @@
+{
+  "name": "gjt-bot-ian",
+  "version": "1.0.0",
+  "description": "Slack bot with a Socket Mode link to my dev laptop",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.js",
+    "start": "node --env-file=.env app.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@slack/bolt": "^5.0.0"
+  }
+}
