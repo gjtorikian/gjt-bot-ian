@@ -8,6 +8,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 
 test('pi starts on demand with repository skills and retains the thread session', async (t) => {
+  t.mock.method(console, 'log', () => {});
   const spawn = t.mock.method(childProcess, 'spawn', () => {
     const child = new EventEmitter();
     child.stdout = new PassThrough();
@@ -55,4 +56,55 @@ test('pi starts on demand with repository skills and retains the thread session'
   }
   assert.match(sessions[0], /^[a-f0-9-]{36}$/);
   assert.equal(sessions[0], sessions[1]);
+});
+
+test('the harness delivers a late background report without a trailing newline', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  const spawn = t.mock.method(childProcess, 'spawn', () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => {};
+    process.nextTick(() => {
+      child.stdout.write(`${JSON.stringify({ type: 'turn_end', message: {
+        role: 'assistant', content: [{ type: 'text', text: 'Review started.' }],
+      } })}\n`);
+      const result = JSON.stringify({ type: 'message_end', message: {
+        role: 'custom', customType: 'subagent-notify', display: false, content: 'Astra review: fix looks good ✓',
+      } });
+      const bytes = Buffer.from(result);
+      const split = bytes.indexOf(Buffer.from('✓')) + 1;
+      child.stdout.write(bytes.subarray(0, split));
+      child.stdout.end(bytes.subarray(split));
+      child.emit('close', 0);
+    });
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
+  const { ask } = await import('../brain.js');
+  const result = await ask('Review with Astra', 'test-channel:background-thread');
+  assert.equal(result.text, 'Astra review: fix looks good ✓');
+});
+
+test('a failed pi process rejects even after an interim assistant message', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  const spawn = t.mock.method(childProcess, 'spawn', () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => {};
+    process.nextTick(() => {
+      child.stdout.end(`${JSON.stringify({ type: 'turn_end', message: {
+        content: [{ type: 'text', text: 'Working on it.' }],
+      } })}\n`);
+      child.stderr.end('Provider unavailable\n');
+      child.emit('close', 1);
+    });
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
+  const { ask } = await import('../brain.js');
+  await assert.rejects(ask('Review it', 'test-channel:failed-thread'), /Provider unavailable/);
 });
