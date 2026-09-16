@@ -3,7 +3,27 @@ function textContent(content) {
   return (content ?? []).filter((block) => block.type === 'text').map((block) => block.text).join('');
 }
 
-export function createPiLogger(key, { level = process.env.BOT_LOG_LEVEL ?? 'info', write = console.log, env = process.env } = {}) {
+const EVENT_COLORS = {
+  start: '1;36',
+  session: '2',
+  agent_start: '2',
+  agent_end: '2',
+  agent_settled: '2',
+  'tool.start': '1;94',
+  'tool.output': '2',
+  'tool.end': '1;32',
+  assistant: '1;35',
+  'background.complete': '1;32',
+  stderr: '1;33',
+  auto_retry_start: '1;33',
+  auto_retry_end: '1;32',
+  exit: '1;32',
+};
+
+export function createPiLogger(key, { level = process.env.BOT_LOG_LEVEL ?? 'info', write = console.log, env = process.env, isTTY = process.stdout.isTTY } = {}) {
+  const color = env.NO_COLOR === undefined && env.FORCE_COLOR !== '0'
+    && (env.FORCE_COLOR !== undefined || (isTTY && env.TERM !== 'dumb'));
+  const paint = (code, text) => color ? `\u001b[${code}m${text}\u001b[0m` : text;
   const secrets = Object.entries(env)
     .filter(([name, value]) => /token|key|secret|password|credential/i.test(name) && value?.length >= 8)
     .map(([, value]) => value).sort((a, b) => b.length - a.length);
@@ -14,7 +34,11 @@ export function createPiLogger(key, { level = process.env.BOT_LOG_LEVEL ?? 'info
     rendered = rendered.replace(/\bxox[baprs]-[A-Za-z0-9-]+/g, '[redacted]')
       .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]');
     if (level !== 'debug' && rendered.length > 1200) rendered = `${rendered.slice(0, 1200)}…`;
-    write(`${new Date().toISOString()} [pi ${key}] ${event} ${rendered}`);
+    const failed = event === 'error' || event.endsWith('.error') || details.isError
+      || (event === 'exit' && (details.code !== 0 || details.signal))
+      || (event === 'auto_retry_end' && details.success === false);
+    const eventColor = failed ? '1;31' : EVENT_COLORS[event] ?? '36';
+    write(`${paint('2', new Date().toISOString())} ${paint('36', `[pi ${key}]`)} ${paint(eventColor, event)} ${rendered}`);
   };
 }
 
