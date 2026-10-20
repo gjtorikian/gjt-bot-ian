@@ -12,6 +12,8 @@ const EVENT_COLORS = {
   'tool.start': '1;94',
   'tool.output': '2',
   'tool.end': '1;32',
+  'workflow.progress': '36',
+  'workflow.complete': '1;32',
   assistant: '1;35',
   'background.complete': '1;32',
   stderr: '1;33',
@@ -42,8 +44,8 @@ export function createPiLogger(key, { level = process.env.BOT_LOG_LEVEL ?? 'info
   };
 }
 
-// Pi emits extension results as custom message_end events, which may arrive
-// after the assistant's last turn_end while print mode drains background work.
+// Extension results can arrive after the assistant's last turn_end. Print mode
+// does not guarantee that background work finishes before it shuts down.
 export function createPiObserver({ model: initialModel, onProgress = () => {}, log = () => {} }) {
   let model = initialModel;
   let cost = 0;
@@ -54,8 +56,43 @@ export function createPiObserver({ model: initialModel, onProgress = () => {}, l
   const toolIds = new Set();
   const tools = [];
   const partials = new Map();
+  const workflows = new Map();
+  let workflowProgress;
 
-  const progress = () => onProgress({ tools: [...tools], cost });
+  const progress = () => onProgress({ tools: [...tools], cost, workflow: workflowProgress });
+  const workflowUpdate = (id, snapshot) => {
+    if (!snapshot || !Array.isArray(snapshot.agents)) return;
+    const state = workflows.get(id) ?? {};
+    const agents = snapshot.agents.map((agent) => {
+      const last = agent.history?.at(-1);
+      return { id: agent.id, label: agent.label, status: agent.status,
+        error: agent.error, activity: last?.kind, tool: last?.toolName, step: agent.history?.length };
+    });
+    const details = { id, runId: snapshot.runId, name: snapshot.name, phase: snapshot.currentPhase,
+      done: agents.filter((agent) => agent.status === 'done').length,
+      running: agents.filter((agent) => agent.status === 'running').length,
+      errors: agents.filter((agent) => agent.status === 'error' || agent.status === 'skipped').length,
+      total: agents.length, agents };
+    const signature = JSON.stringify(details);
+    if (signature === state.signature) return;
+    workflows.set(id, { ...state, signature });
+    workflowProgress = { done: details.done, total: details.total, running: details.running, errors: details.errors };
+    log('workflow.progress', details);
+    progress();
+  };
+  const workflowEnd = (event) => {
+    const details = event.result?.details;
+    workflowUpdate(event.toolCallId, details);
+    const runId = details?.runId ?? event.toolCallId;
+    let failure;
+    if (event.isError) failure = `Workflow ${runId} failed: ${textContent(event.result?.content)}`;
+    else if (details?.background) failure = `Workflow ${runId} was left in the background. This one-shot pi process cannot complete or deliver it after exiting.`;
+    else if (details?.agents?.some((agent) => agent.status !== 'done')) {
+      failure = `Workflow ${runId} ended with unfinished or failed agents.`;
+    }
+    workflows.set(event.toolCallId, { failure });
+    log(failure ? 'workflow.error' : 'workflow.complete', { id: event.toolCallId, runId, message: failure });
+  };
   const recordTool = (id, name) => {
     if (!name || (id && toolIds.has(id))) return;
     if (id) toolIds.add(id);
@@ -93,10 +130,14 @@ export function createPiObserver({ model: initialModel, onProgress = () => {}, l
           log(event.type, { willRetry: event.willRetry });
           break;
         case 'tool_execution_start':
+          if (event.toolName === 'workflow') {
+            workflows.set(event.toolCallId, { failure: `pi exited before workflow ${event.toolCallId} finished.` });
+          }
           recordTool(event.toolCallId, event.toolName);
           log('tool.start', { name: event.toolName, id: event.toolCallId, args: event.args });
           break;
         case 'tool_execution_update': {
+          if (event.toolName === 'workflow') workflowUpdate(event.toolCallId, event.partialResult?.details);
           const output = textContent(event.partialResult?.content);
           const previous = partials.get(event.toolCallId) ?? '';
           const delta = output.startsWith(previous) ? output.slice(previous.length) : output;
@@ -109,6 +150,7 @@ export function createPiObserver({ model: initialModel, onProgress = () => {}, l
           partials.delete(event.toolCallId);
           log('tool.end', { name: event.toolName, id: event.toolCallId, isError: event.isError,
             text: textContent(event.result?.content) });
+          if (event.toolName === 'workflow') workflowEnd(event);
           progress();
           break;
         case 'message_end': {
@@ -140,6 +182,8 @@ export function createPiObserver({ model: initialModel, onProgress = () => {}, l
     },
     result() {
       if (error) throw new Error(error);
+      const failedWorkflow = [...workflows.values()].find((workflow) => workflow.failure);
+      if (failedWorkflow) throw new Error(failedWorkflow.failure);
       return {
         text: completions.length ? completions.join('\n\n') : lastAssistant || '(pi returned no text)',
         footer: `_${model.split('/').pop()} · ${tools.length} tool${tools.length === 1 ? '' : 's'} · $${cost.toFixed(4)}_`,

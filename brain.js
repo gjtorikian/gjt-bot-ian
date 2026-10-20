@@ -17,8 +17,9 @@ const THINKING = process.env.BOT_THINKING ?? 'medium';
 const CWD = process.env.BOT_CWD ?? `${process.env.HOME}/Developer`;
 // Anchor skills to this repo, even when pi works in a different directory.
 const SKILLS_DIR = fileURLToPath(new URL('./skills/', import.meta.url));
+const WORKFLOW_EXTENSION = fileURLToPath(new URL('./pi-workflows.js', import.meta.url));
 const SESSION_DIR = `${process.env.HOME}/.gjt-bot-ian/sessions`;
-const TIMEOUT_MS = Number(process.env.BOT_TIMEOUT_MS ?? 5 * 60 * 1000);
+const TIMEOUT_MS = Number(process.env.BOT_TIMEOUT_MS ?? 15 * 60 * 1000);
 const FIRST_EVENT_MS = Number(process.env.BOT_FIRST_EVENT_MS ?? 45_000);
 
 mkdirSync(SESSION_DIR, { recursive: true });
@@ -27,6 +28,11 @@ const SYSTEM = `You are gjt-bot-ian, reached through Slack. You are running on
 Garen's MacBook with full tool access, in ${CWD}.
 
 Read applicable available skills before acting.
+
+This is a one-shot process: it exits after your reply. Run workflows with
+background: false and wait for their results before replying. Never promise a
+later automatic reply. Background workflow resumes are unavailable here;
+report that limitation rather than silently repeating previously started work.
 
 Formatting: Slack mrkdwn, NOT Markdown. Bold is *one asterisk*. There are no
 headers — never emit "#". Code goes in backticks or a fenced block. Links are
@@ -71,6 +77,7 @@ function run(prompt, key, onProgress) {
     '--session-id', sessionId(key),
     '--session-dir', SESSION_DIR,
     '--skill', SKILLS_DIR,
+    '--extension', WORKFLOW_EXTENSION,
     '--append-system-prompt', SYSTEM,
     '--', prompt,
   ];

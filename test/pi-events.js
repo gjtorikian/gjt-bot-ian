@@ -91,3 +91,47 @@ test('model errors cannot be mistaken for completed answers', () => {
   observer.handle({ type: 'message_end', message: { ...assistant('Working on it'), stopReason: 'error', errorMessage: 'Provider unavailable' } });
   assert.throws(() => observer.result(), /Provider unavailable/);
 });
+
+const workflowSnapshot = (status = 'running', history = []) => ({
+  name: 'review', runId: 'review-123', currentPhase: 'Investigate',
+  agents: [{ id: 1, label: 'PR reviewer', status, history }],
+});
+
+test('workflow activity is logged at info level and reaches progress without repeating snapshots', () => {
+  const logs = [];
+  const updates = [];
+  const observer = createPiObserver({ model: 'model', onProgress: (update) => updates.push(update),
+    log: createPiLogger('thread', { level: 'info', env: {}, write: (line) => logs.push(line) }) });
+  observer.handle({ type: 'tool_execution_start', toolName: 'workflow', toolCallId: 'call-1' });
+  const snapshot = workflowSnapshot('running', [{ kind: 'toolCall', toolName: 'bash', text: 'private args' }]);
+  const update = { type: 'tool_execution_update', toolName: 'workflow', toolCallId: 'call-1', partialResult: { details: snapshot } };
+  observer.handle(update);
+  observer.handle(update);
+  observer.handle({ ...update, partialResult: { details: workflowSnapshot('done') } });
+  assert.equal(logs.filter((line) => line.includes('workflow.progress')).length, 2);
+  assert.match(logs.join('\n'), /PR reviewer.*running.*toolCall.*bash/);
+  assert.doesNotMatch(logs.join('\n'), /private args/);
+  assert.deepEqual(updates.at(-1).workflow, { done: 1, total: 1, running: 0, errors: 0 });
+  observer.handle({ type: 'tool_execution_end', toolName: 'workflow', toolCallId: 'call-1',
+    result: { details: workflowSnapshot('done') } });
+  observer.handle({ type: 'message_end', message: assistant('Completed review') });
+  assert.equal(observer.result().text, 'Completed review');
+  assert.match(logs.join('\n'), /workflow.complete/);
+});
+
+for (const [name, end] of [
+  ['missing completion', undefined],
+  ['tool error', { isError: true, result: { content: [{ type: 'text', text: 'Request aborted' }] } }],
+  ['unfinished agents', { result: { details: workflowSnapshot() } }],
+  ['aborted agents', { result: { details: workflowSnapshot('skipped') } }],
+]) {
+  test(`workflow ${name} cannot be hidden by a successful assistant message`, () => {
+    const observer = createPiObserver({ model: 'model' });
+    observer.handle({ type: 'tool_execution_start', toolName: 'workflow', toolCallId: 'call-1' });
+    observer.handle({ type: 'tool_execution_update', toolName: 'workflow', toolCallId: 'call-1',
+      partialResult: { details: workflowSnapshot() } });
+    if (end) observer.handle({ type: 'tool_execution_end', toolName: 'workflow', toolCallId: 'call-1', ...end });
+    observer.handle({ type: 'message_end', message: assistant('Everything is fine') });
+    assert.throws(() => observer.result(), /workflow/i);
+  });
+}

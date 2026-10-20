@@ -63,13 +63,26 @@ export async function threadPrompt(client, event, body, botUserId) {
 
 function progressReporter(client, channel, ts) {
   let last = 0;
-  return ({ tools }) => {
-    const now = Date.now();
-    if (now - last < 2000) return;
-    last = now;
-    const recent = tools.slice(-4).join(' → ');
-    client.chat.update({ channel, ts, text: `_working… ${tools.length} tools_\n\`${recent}\`` })
-      .catch((err) => console.error(`chat.update failed: ${err.data?.error ?? err.message}`));
+  let pending;
+  let finished = false;
+  return {
+    report({ tools, workflow }) {
+      const now = Date.now();
+      if (finished || pending || now - last < 2000) return;
+      last = now;
+      const recent = tools.slice(-4).join(' → ');
+      const status = workflow
+        ? `${workflow.done}/${workflow.total} agents finished · ${workflow.running} running${workflow.errors ? ` · ${workflow.errors} failed/skipped` : ''}`
+        : `${tools.length} tools`;
+      pending = client.chat.update({ channel, ts, text: `_working… ${status}_\n\`${recent}\`` })
+        .catch((err) => console.error(`chat.update failed: ${err.data?.error ?? err.message}`))
+        .finally(() => { pending = undefined; });
+    },
+    async finish() {
+      finished = true;
+      // A delayed progress request must not overwrite the final reply/error.
+      await pending;
+    },
   };
 }
 
@@ -94,12 +107,15 @@ export function registerSlackHandlers(app, { allowedUsers, ask }) {
     }
 
     const placeholder = await say({ text: '_working…_', thread_ts: thread });
+    const progress = progressReporter(client, channel, placeholder.ts);
     try {
       const prompt = await threadPrompt(client, event, body, context.botUserId);
       const { text: reply, footer } = await ask(prompt, `${channel}:${thread}`,
-        progressReporter(client, channel, placeholder.ts));
+        progress.report);
+      await progress.finish();
       await client.chat.update({ channel, ts: placeholder.ts, text: `${reply}\n\n${footer}` });
     } catch (err) {
+      await progress.finish();
       console.error(`Slack request failed: ${err.data?.error ?? err.message}`);
       await client.chat.update({ channel, ts: placeholder.ts, text: `:warning: ${err.message}` });
     }

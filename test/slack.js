@@ -96,6 +96,34 @@ test('threaded DMs receive the parent context too', async (t) => {
   assert.ok(quotedContext(ask.mock.calls[0].arguments[0]).messages[0].text.includes(PR_URL));
 });
 
+for (const failed of [false, true]) {
+  test(`workflow progress finishes before the final ${failed ? 'error' : 'reply'} is sent`, async (t) => {
+    t.mock.method(console, 'error', () => {});
+    const { send, ask, client } = fixture(t);
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    let started;
+    const progressStarted = new Promise((resolve) => { started = resolve; });
+    client.chat.update.mock.mockImplementationOnce(() => { started(); return pending; });
+    ask.mock.mockImplementation(async (_prompt, _key, onProgress) => {
+      onProgress({ tools: ['workflow'], workflow: { done: 1, total: 3, running: 2, errors: 0 } });
+      if (failed) throw new Error('Workflow review-123 was left in the background.');
+      return { text: 'Completed review', footer: 'usage' };
+    });
+    const response = send(mention('Review the PR'));
+    await progressStarted;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(client.chat.update.mock.callCount(), 1, 'final message must wait for the pending update');
+    assert.match(client.chat.update.mock.calls[0].arguments[0].text, /1\/3 agents finished · 2 running/);
+    release({});
+    await response;
+    assert.equal(client.chat.update.mock.callCount(), 2);
+    assert.equal(client.chat.update.mock.calls[1].arguments[0].text, failed
+      ? ':warning: Workflow review-123 was left in the background.'
+      : 'Completed review\n\nusage');
+  });
+}
+
 test('unauthorized users and bot messages cannot fetch thread history or invoke pi', async (t) => {
   const { send, client, ask } = fixture(t);
   await send(mention('approve', { user: 'USTRANGER' }));
