@@ -1,6 +1,7 @@
 import { App } from '@slack/bolt';
 import { ask } from './brain.js';
 import { registerSlackHandlers } from './slack.js';
+import { localApiClient, localApiConfig, startLocalApi } from './local-api.js';
 
 // Fail closed: with no allowlist configured, the bot answers nobody.
 // Everyone on this list gets full tool access to this laptop through pi.
@@ -11,6 +12,7 @@ if (ALLOWED.size === 0) {
   console.error('SLACK_ALLOWED_USERS is empty — set it to your Slack member ID (U…) and restart.');
   process.exit(1);
 }
+const localConfig = localApiConfig(process.env, ALLOWED);
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -26,4 +28,14 @@ const app = new App({
 registerSlackHandlers(app, { allowedUsers: ALLOWED, ask });
 
 await app.start();
+try {
+  const localApi = await startLocalApi({
+    config: localConfig,
+    client: localConfig ? localApiClient(process.env.SLACK_BOT_TOKEN) : undefined,
+  });
+  if (localApi) console.log(`Local notifications: http://127.0.0.1:${localApi.address().port}/notify`);
+} catch (err) {
+  await app.stop();
+  throw err;
+}
 console.log(`⚡️ gjt-bot-ian connected — allowlist: ${[...ALLOWED].join(', ')}`);
