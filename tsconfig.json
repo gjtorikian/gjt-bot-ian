@@ -1,0 +1,16 @@
+{
+  // Node runs these files directly by stripping the types, so tsc only checks.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    // Reject syntax Node cannot strip (enums, namespaces, parameter properties).
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true
+  },
+  "include": ["*.ts", "test"]
+}

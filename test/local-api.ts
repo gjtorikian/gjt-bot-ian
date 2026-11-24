@@ -1,30 +1,54 @@
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
+import type { IncomingHttpHeaders, OutgoingHttpHeaders } from 'node:http';
 import { connect } from 'node:net';
 import { test } from 'node:test';
-import { localApiClient, localApiConfig, startLocalApi } from '../local-api.js';
+import type { Mock, TestContext } from 'node:test';
+import type { webApi } from '@slack/bolt';
+import { localApiClient, localApiConfig, startLocalApi } from '../local-api.ts';
+
+// Slack payloads are inspected loosely here; local-api.ts checks them against the SDK's types.
+type SlackCall = (args: any) => Promise<any>;
+interface FakeClient {
+  conversations: { open: Mock<SlackCall> };
+  chat: { postMessage: Mock<SlackCall> };
+}
+interface SendOptions {
+  body?: string | Buffer;
+  headers?: OutgoingHttpHeaders;
+  method?: string;
+  path?: string;
+}
+interface Reply {
+  status: number | undefined;
+  headers: IncomingHttpHeaders;
+  body: any;
+}
 
 const TOKEN = '0123456789abcdef'.repeat(4);
 const ALLOWED = new Set(['UALLOWED']);
 const ENV = { BOT_LOCAL_API_PORT: '3210', BOT_LOCAL_API_TOKEN: TOKEN };
 
-async function fixture(t, overrides = {}) {
-  const client = {
-    conversations: { open: t.mock.fn(async () => ({ ok: true, channel: { id: 'DDIRECT' } })) },
-    chat: { postMessage: t.mock.fn(async () => ({ ok: true, ts: '123.456' })) },
+async function fixture(t: TestContext, overrides: Partial<FakeClient> = {}) {
+  const client: FakeClient = {
+    conversations: { open: t.mock.fn<SlackCall>(async () => ({ ok: true, channel: { id: 'DDIRECT' } })) },
+    chat: { postMessage: t.mock.fn<SlackCall>(async () => ({ ok: true, ts: '123.456' })) },
     ...overrides,
   };
-  const logs = [];
+  const logs: string[] = [];
+  const config = localApiConfig(ENV, ALLOWED);
+  assert.ok(config);
   const server = await startLocalApi({
-    config: { ...localApiConfig(ENV, ALLOWED), port: 0 }, client, log: (line) => logs.push(line),
+    config: { ...config, port: 0 }, client, log: (line) => logs.push(line),
   });
+  assert.ok(server);
   t.after(async () => {
     const closed = new Promise((resolve) => server.close(resolve));
     server.closeAllConnections();
     await closed;
   });
   const port = server.address().port;
-  const send = ({ body = JSON.stringify({ text: 'Build finished.' }), headers = {}, method = 'POST', path = '/notify' } = {}) => new Promise((resolve, reject) => {
+  const send = ({ body = JSON.stringify({ text: 'Build finished.' }), headers = {}, method = 'POST', path = '/notify' }: SendOptions = {}) => new Promise<Reply>((resolve, reject) => {
     const req = request({ host: '127.0.0.1', port, method, path, agent: false, headers: {
       Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json', ...headers,
     } }, (res) => {
@@ -51,7 +75,7 @@ test('local API is opt-in and rejects incomplete or unsafe configuration', async
   ]) assert.throws(() => localApiConfig(env, ALLOWED));
   assert.throws(() => localApiConfig(ENV, new Set()));
   assert.throws(() => localApiConfig(ENV, new Set(['UALLOWED', 'UOTHER'])));
-  assert.equal(localApiConfig({ ...ENV, BOT_LOCAL_API_USER: 'UOTHER' }, new Set(['UALLOWED', 'UOTHER'])).user, 'UOTHER');
+  assert.equal(localApiConfig({ ...ENV, BOT_LOCAL_API_USER: 'UOTHER' }, new Set(['UALLOWED', 'UOTHER']))?.user, 'UOTHER');
 });
 
 test('an authenticated notification is literal text in the configured user’s DM', async (t) => {
@@ -82,7 +106,7 @@ test('Node fetch can notify while browser Origin and fetch metadata remain block
     [{}, 200],
     [{ Origin: 'https://example.com' }, 403],
     [{ 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'empty' }, 403],
-  ]) {
+  ] satisfies [Record<string, string>, number][]) {
     const response = await fetch(`http://127.0.0.1:${port}/notify`, {
       method: 'POST', redirect: 'error',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}`, ...extraHeaders },
@@ -116,7 +140,7 @@ test('auth, browser, routing, and content checks reject requests before contacti
     [{ headers: { 'Content-Type': 'application/json; charset=latin1' } }, 415],
     [{ headers: { 'Content-Encoding': 'gzip' } }, 415],
     [{ headers: { 'Content-Length': '20000' }, body: '' }, 413],
-  ]) assert.equal((await send(options)).status, status, JSON.stringify(options));
+  ] satisfies [SendOptions, number][]) assert.equal((await send(options)).status, status, JSON.stringify(options));
   assert.equal(client.conversations.open.mock.callCount(), 0);
   assert.equal(client.chat.postMessage.mock.callCount(), 0);
 });
@@ -140,7 +164,7 @@ test('JSON schema and streamed size limits prevent arbitrary Slack arguments and
 
 test('Slack failures return generic errors without leaking token or message data', async (t) => {
   const { send, logs } = await fixture(t, {
-    chat: { postMessage: t.mock.fn(async () => { throw new Error(`private body ${TOKEN}`); }) },
+    chat: { postMessage: t.mock.fn<SlackCall>(async () => { throw new Error(`private body ${TOKEN}`); }) },
   });
   const result = await send();
   assert.equal(result.status, 502);
@@ -150,15 +174,15 @@ test('Slack failures return generic errors without leaking token or message data
 });
 
 test('the notification Slack client neither retries nor logs raw SDK errors', async (t) => {
-  const logs = [];
-  for (const method of ['log', 'warn', 'error', 'info', 'debug']) {
-    t.mock.method(console, method, (...args) => logs.push(args));
+  const logs: unknown[][] = [];
+  for (const method of ['log', 'warn', 'error', 'info', 'debug'] as const) {
+    t.mock.method(console, method, (...args: unknown[]) => logs.push(args));
   }
-  const transport = t.mock.fn(async () => { throw new Error(`private body ${TOKEN}`); });
+  const transport = t.mock.fn<webApi.FetchFunction>(async () => { throw new Error(`private body ${TOKEN}`); });
   const client = localApiClient('xoxb-test-token', { fetch: transport });
   await assert.rejects(client.chat.postMessage({ channel: 'DDIRECT', text: 'secret message' }));
   assert.equal(transport.mock.callCount(), 1);
-  assert.ok(transport.mock.calls[0].arguments[1].signal instanceof AbortSignal);
+  assert.ok(transport.mock.calls[0].arguments[1]?.signal instanceof AbortSignal);
   transport.mock.mockImplementation(async () => new Response(JSON.stringify({
     ok: false, error: 'invalid_auth',
     response_metadata: { warnings: [TOKEN], messages: [`[ERROR] ${TOKEN}`] },
@@ -178,12 +202,12 @@ test('unexpected Slack responses cannot redirect delivery or claim success', asy
 });
 
 test('concurrent deliveries are bounded and the limit clears after failure', async (t) => {
-  let release;
-  let started;
-  const pending = new Promise((resolve) => { release = resolve; });
-  const active = new Promise((resolve) => { started = resolve; });
+  let release!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const active = new Promise<void>((resolve) => { started = resolve; });
   const { send } = await fixture(t, {
-    conversations: { open: async () => { started(); await pending; throw new Error('Slack unavailable'); } },
+    conversations: { open: t.mock.fn<SlackCall>(async () => { started(); await pending; throw new Error('Slack unavailable'); }) },
   });
   const first = send();
   await active;
@@ -234,8 +258,8 @@ test('Expect: 100-continue is accepted only after authentication', async (t) => 
 
 test('aborted requests release the delivery slot without sending to Slack', { timeout: 3000 }, async (t) => {
   const { server, port, send, client } = await fixture(t);
-  let started;
-  const received = new Promise((resolve) => { started = resolve; });
+  let started!: () => void;
+  const received = new Promise<void>((resolve) => { started = resolve; });
   const aborted = new Promise((resolve) => server.once('request', (req) => {
     started();
     req.once('aborted', resolve);
@@ -253,7 +277,7 @@ test('aborted requests release the delivery slot without sending to Slack', { ti
 
 test('slow bodies time out and release the single delivery slot', { timeout: 10_000 }, async (t) => {
   const { port, send, client } = await fixture(t);
-  const response = await new Promise((resolve, reject) => {
+  const response = await new Promise<string>((resolve, reject) => {
     const socket = connect(port, '127.0.0.1', () => {
       socket.write(`POST /notify HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nAuthorization: Bearer ${TOKEN}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`);
     });

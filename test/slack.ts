@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { registerSlackHandlers, threadPrompt } from '../slack.js';
+import type { TestContext } from 'node:test';
+import type { App } from '@slack/bolt';
+import type { PiResult, ProgressHandler } from '../pi-events.ts';
+import { registerSlackHandlers, threadPrompt } from '../slack.ts';
+
+// Slack payloads are inspected loosely here; slack.ts checks them against the SDK's types.
+type SlackCall = (args: any) => Promise<any>;
+type Handler = (args: object) => Promise<void>;
+type Ask = (prompt: string, key: string, onProgress: ProgressHandler) => Promise<PiResult>;
 
 const ROOT_TS = '1789478070.249629';
 const REQUEST_TS = '1789478072.000000';
@@ -10,28 +18,29 @@ const ROOT = {
   text: `README sync: <${PR_URL}|#42>`,
 };
 
-function fixture(t, pages = [{ ok: true, messages: [ROOT], has_more: false }]) {
-  const handlers = new Map();
+function fixture(t: TestContext, pages: object[] = [{ ok: true, messages: [ROOT], has_more: false }]) {
+  const handlers = new Map<string, Handler>();
+  // Only the two registration methods the bot uses.
   const app = {
-    event: (type, handler) => handlers.set(type, handler),
-    message: (handler) => handlers.set('message', handler),
-  };
+    event: (type: string, handler: Handler) => handlers.set(type, handler),
+    message: (handler: Handler) => handlers.set('message', handler),
+  } as unknown as App;
   let page = 0;
   const client = {
-    conversations: { replies: t.mock.fn(async () => {
+    conversations: { replies: t.mock.fn<SlackCall>(async () => {
       const result = pages[page++];
       if (result instanceof Error) throw result;
       return result;
     }) },
-    chat: { update: t.mock.fn(async () => ({})) },
-    reactions: { add: t.mock.fn(async () => ({})) },
+    chat: { update: t.mock.fn<SlackCall>(async () => ({})) },
+    reactions: { add: t.mock.fn<SlackCall>(async () => ({})) },
   };
-  const say = t.mock.fn(async () => ({ ts: '1789478073.000000' }));
-  const ask = t.mock.fn(async () => ({ text: 'reply', footer: 'usage' }));
+  const say = t.mock.fn<SlackCall>(async () => ({ ts: '1789478073.000000' }));
+  const ask = t.mock.fn<Ask>(async () => ({ text: 'reply', footer: 'usage' }));
   registerSlackHandlers(app, { allowedUsers: new Set(['UALLOWED']), ask });
   return {
     client, say, ask,
-    async send(event) {
+    async send(event: { type: string; [field: string]: unknown }) {
       const handler = handlers.get(event.type);
       if (handler) await handler({
         event, message: event, client, say, context: { botUserId: 'UBOT' },
@@ -40,7 +49,7 @@ function fixture(t, pages = [{ ok: true, messages: [ROOT], has_more: false }]) {
   };
 }
 
-function mention(text, overrides = {}) {
+function mention(text: string, overrides: object = {}) {
   return {
     type: 'app_mention', channel: 'CCHANNEL', user: 'UALLOWED',
     ts: REQUEST_TS, thread_ts: ROOT_TS, text: `<@UBOT> ${text}`,
@@ -48,7 +57,7 @@ function mention(text, overrides = {}) {
   };
 }
 
-function quotedContext(prompt) {
+function quotedContext(prompt: string) {
   return JSON.parse(prompt.slice(prompt.lastIndexOf('\n') + 1));
 }
 
@@ -69,7 +78,7 @@ for (const request of ['approve and label', 'label and approve']) {
     assert.deepEqual(client.conversations.replies.mock.calls[0].arguments[0], {
       channel: 'CCHANNEL', ts: ROOT_TS, latest: REQUEST_TS, inclusive: false, limit: 100,
     });
-    assert.equal(client.chat.update.mock.calls.at(-1).arguments[0].text, 'reply\n\nusage');
+    assert.equal(client.chat.update.mock.calls.at(-1)?.arguments[0].text, 'reply\n\nusage');
   });
 }
 
@@ -100,13 +109,13 @@ for (const failed of [false, true]) {
   test(`workflow progress finishes before the final ${failed ? 'error' : 'reply'} is sent`, async (t) => {
     t.mock.method(console, 'error', () => {});
     const { send, ask, client } = fixture(t);
-    let release;
-    const pending = new Promise((resolve) => { release = resolve; });
-    let started;
-    const progressStarted = new Promise((resolve) => { started = resolve; });
+    let release!: (value: object) => void;
+    const pending = new Promise<object>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const progressStarted = new Promise<void>((resolve) => { started = resolve; });
     client.chat.update.mock.mockImplementationOnce(() => { started(); return pending; });
     ask.mock.mockImplementation(async (_prompt, _key, onProgress) => {
-      onProgress({ tools: ['workflow'], workflow: { done: 1, total: 3, running: 2, errors: 0 } });
+      onProgress({ tools: ['workflow'], cost: 0, workflow: { done: 1, total: 3, running: 2, errors: 0 } });
       if (failed) throw new Error('Workflow review-123 was left in the background.');
       return { text: 'Completed review', footer: 'usage' };
     });
@@ -146,7 +155,7 @@ test('pagination includes other participants, but excludes the request, future m
     ], has_more: false },
   ]);
   const prompt = await threadPrompt(client, mention('label and approve'), 'label and approve', 'UBOT');
-  assert.deepEqual(quotedContext(prompt).messages.map(message => message.ts), [ROOT_TS, earlier.ts]);
+  assert.deepEqual(quotedContext(prompt).messages.map((message: { ts: string }) => message.ts), [ROOT_TS, earlier.ts]);
   assert.equal(client.conversations.replies.mock.calls[1].arguments[0].cursor, 'page-two');
 });
 
@@ -165,12 +174,12 @@ for (const [name, response] of [
   ['parent message missing', { ok: true, messages: [] }],
   ['pagination incomplete', { ok: true, messages: [ROOT], has_more: true }],
   ['thread too large', { ok: true, messages: [{ ...ROOT, text: 'a'.repeat(64_001) }] }],
-]) {
+] satisfies [string, object][]) {
   test(`${name} reports a problem without asking pi to guess`, async (t) => {
     t.mock.method(console, 'error', () => {});
     const { send, client, ask } = fixture(t, [response]);
     await send(mention('approve and label'));
     assert.equal(ask.mock.callCount(), 0);
-    assert.match(client.chat.update.mock.calls.at(-1).arguments[0].text, /^:warning:/);
+    assert.match(client.chat.update.mock.calls.at(-1)?.arguments[0].text, /^:warning:/);
   });
 }

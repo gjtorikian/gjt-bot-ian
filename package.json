@@ -4,8 +4,12 @@
   "description": "Slack bot with a Socket Mode link to my dev laptop",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test/*.js",
-    "start": "node --env-file=.env app.js"
+    "test": "node --test test/*.ts",
+    "start": "node --env-file=.env app.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.18.0"
   },
   "keywords": [],
   "author": "",
@@ -13,5 +17,9 @@
   "type": "module",
   "dependencies": {
     "@slack/bolt": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
   }
 }

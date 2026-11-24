@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createPiLogger, createPiObserver } from './pi-events.js';
+import { createPiLogger, createPiObserver } from './pi-events.ts';
+import type { PiEvent, PiResult, ProgressHandler } from './pi-events.ts';
 
 // pi holds the credentials — this process never sees an API key.
 //
@@ -17,7 +18,7 @@ const THINKING = process.env.BOT_THINKING ?? 'medium';
 const CWD = process.env.BOT_CWD ?? `${process.env.HOME}/Developer`;
 // Anchor skills to this repo, even when pi works in a different directory.
 const SKILLS_DIR = fileURLToPath(new URL('./skills/', import.meta.url));
-const WORKFLOW_EXTENSION = fileURLToPath(new URL('./pi-workflows.js', import.meta.url));
+const WORKFLOW_EXTENSION = fileURLToPath(new URL('./pi-workflows.ts', import.meta.url));
 const SESSION_DIR = `${process.env.HOME}/.gjt-bot-ian/sessions`;
 const TIMEOUT_MS = Number(process.env.BOT_TIMEOUT_MS ?? 15 * 60 * 1000);
 const FIRST_EVENT_MS = Number(process.env.BOT_FIRST_EVENT_MS ?? 45_000);
@@ -49,17 +50,17 @@ which PR to approve.`;
 
 // One pi session per Slack thread, so follow-ups keep context. pi wants a
 // session id, so hash the thread key into a stable UUID.
-function sessionId(key) {
+function sessionId(key: string): string {
   const h = createHash('sha256').update(key).digest('hex');
   return [h.slice(0, 8), h.slice(8, 12), `7${h.slice(13, 16)}`, `a${h.slice(17, 20)}`, h.slice(20, 32)].join('-');
 }
 
 // Serialize runs per session — two concurrent pi processes on one session file
 // would clobber each other's history.
-const RUNNING = new Map();
+const RUNNING = new Map<string, Promise<PiResult>>();
 
-export function ask(prompt, key, onProgress = () => {}) {
-  const prior = RUNNING.get(key) ?? Promise.resolve();
+export function ask(prompt: string, key: string, onProgress: ProgressHandler = () => {}): Promise<PiResult> {
+  const prior: Promise<unknown> = RUNNING.get(key) ?? Promise.resolve();
   const next = prior.catch(() => {}).then(() => run(prompt, key, onProgress));
   RUNNING.set(key, next);
   const cleanup = () => { if (RUNNING.get(key) === next) RUNNING.delete(key); };
@@ -67,7 +68,7 @@ export function ask(prompt, key, onProgress = () => {}) {
   return next;
 }
 
-function run(prompt, key, onProgress) {
+function run(prompt: string, key: string, onProgress: ProgressHandler): Promise<PiResult> {
   const log = createPiLogger(key);
   const started = Date.now();
   const args = [
@@ -93,7 +94,7 @@ function run(prompt, key, onProgress) {
     let buf = '';
     let settled = false;
 
-    const fail = (msg) => {
+    const fail = (msg: string) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -107,19 +108,19 @@ function run(prompt, key, onProgress) {
 
     // A model pi cannot actually reach produces no output at all, forever.
     // Don't let that wedge the thread — surface it.
-    let firstEvent = setTimeout(
+    let firstEvent: NodeJS.Timeout | undefined = setTimeout(
       () => fail(`pi produced no output in ${Math.round(FIRST_EVENT_MS / 1000)}s using model ${MODEL || '(pi default)'}. ` +
         'Check that model outside Slack, or set BOT_MODEL= to use pi\'s default.'), FIRST_EVENT_MS);
 
-    const handleLine = (line) => {
+    const handleLine = (line: string) => {
       if (settled || !line.trim()) return;
-      let event;
+      let event: PiEvent;
       try { event = JSON.parse(line); } catch { log('stdout', { text: line }, true); return; }
-      if (firstEvent) { clearTimeout(firstEvent); firstEvent = null; }
+      if (firstEvent) { clearTimeout(firstEvent); firstEvent = undefined; }
       observer.handle(event);
     };
     pi.stdout.setEncoding('utf8');
-    pi.stdout.on('data', (chunk) => {
+    pi.stdout.on('data', (chunk: string) => {
       buf += chunk;
       const lines = buf.split('\n');
       buf = lines.pop() ?? '';
@@ -127,7 +128,7 @@ function run(prompt, key, onProgress) {
     });
 
     pi.stderr.setEncoding('utf8');
-    pi.stderr.on('data', (chunk) => {
+    pi.stderr.on('data', (chunk: string) => {
       stderr = (stderr + chunk).slice(-16_000);
       log('stderr', { text: chunk });
     });
@@ -147,7 +148,7 @@ function run(prompt, key, onProgress) {
         settled = true;
         resolve(result);
       } catch (err) {
-        fail(err.message);
+        fail(err instanceof Error ? err.message : String(err));
       }
     });
   });

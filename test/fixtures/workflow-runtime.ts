@@ -3,7 +3,27 @@
 // background-by-default behavior.
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 
-export default function workflowFixture(pi) {
+// The slice of pi's extension API this fixture uses; pi supplies the real one.
+interface FixturePi {
+  registerProvider(name: string, provider: {
+    streamSimple(
+      model: { api: string; provider: string; id: string },
+      context: { messages: { role: string; content: { text: string }[] }[] },
+    ): unknown;
+    [option: string]: unknown;
+  }): void;
+  registerTool(tool: {
+    execute(
+      id: string,
+      input: { background?: boolean },
+      signal: unknown,
+      onUpdate: (update: object) => void,
+    ): Promise<object>;
+    [option: string]: unknown;
+  }): void;
+}
+
+export default function workflowFixture(pi: FixturePi) {
   pi.registerProvider('bot-test', {
     baseUrl: 'http://127.0.0.1:1', apiKey: 'test-only', api: 'bot-test-api',
     models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],

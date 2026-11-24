@@ -6,7 +6,7 @@ require an @mention; authorized users can also DM the bot directly.
 ## Workflows
 
 Each Slack request runs pi in one-shot print mode. The bot loads
-`pi-workflows.js` to force new `workflow` calls into the foreground, including
+`pi-workflows.ts` to force new `workflow` calls into the foreground, including
 calls that explicitly request `background: true`. Parallel agents inside a
 workflow can still run concurrently; the tool waits for their result before pi
 replies and exits. Background resume calls are blocked because the workflow
@@ -129,3 +129,6 @@ settings and restart to disable the endpoint.
 
 `npm test` runs the suite without sending Slack messages. The optional live pi
 test runs only when `BOT_LIVE_TEST=1` is set.
+
+The code is TypeScript that Node 22.18 or later runs directly, with no build
+step. `npm run typecheck` checks the types.

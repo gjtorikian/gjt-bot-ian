@@ -1,25 +1,55 @@
+import type { App, SayFn, webApi } from '@slack/bolt';
+import type { PiResult, ProgressHandler, ProgressUpdate } from './pi-events.ts';
+
 const MAX_THREAD_PAGES = 10;
 const MAX_CONTEXT_BYTES = 64_000;
 
+// The Slack SDK attaches the API's error details to the errors it throws.
+type SlackError = Error & { data?: { error?: string }; code?: string };
+
+// The fields of an app mention or direct message that a request needs.
+interface SlackRequest {
+  user?: string;
+  bot_id?: string;
+  channel: string;
+  ts: string;
+  thread_ts?: string;
+  text?: string;
+}
+
+interface QuotedMessage {
+  ts: string;
+  author: string;
+  text: string;
+  blocks?: unknown[];
+  attachments?: unknown[];
+}
+
 // Fetch only this thread, through the current request. Keep other bots' posts:
 // automated PR announcements are often the parent message we need.
-export async function threadPrompt(client, event, body, botUserId) {
+export async function threadPrompt(
+  client: { conversations: Pick<webApi.WebClient['conversations'], 'replies'> },
+  event: SlackRequest,
+  body: string,
+  botUserId?: string,
+): Promise<string> {
   const { channel, ts, thread_ts } = event;
   if (!thread_ts || thread_ts === ts) return body;
 
-  const messages = new Map();
-  const cursors = new Set();
-  let cursor;
+  const messages = new Map<string, QuotedMessage>();
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
   let contextBytes = 0;
   for (let page = 0; page < MAX_THREAD_PAGES; page++) {
-    let result;
+    let result: webApi.ConversationsRepliesResponse;
     try {
       result = await client.conversations.replies({
         channel, ts: thread_ts, latest: ts, inclusive: false, limit: 100,
         ...(cursor ? { cursor } : {}),
       });
       if (!result.ok) throw new Error(result.error ?? 'unknown_error');
-    } catch (err) {
+    } catch (caught) {
+      const err = caught as SlackError;
       const reason = err.data?.error ?? err.code ?? err.message;
       throw new Error(`Couldn't read this Slack thread (${reason}). Check the app's history access or start a new @mention with the relevant link.`, { cause: err });
     }
@@ -29,7 +59,7 @@ export async function threadPrompt(client, event, body, botUserId) {
       // Our earlier replies are already in pi's saved session. Preserve a
       // parent posted by us, but omit our intermediate progress updates.
       if (botUserId && message.user === botUserId && message.ts !== thread_ts) continue;
-      const quoted = {
+      const quoted: QuotedMessage = {
         ts: message.ts,
         author: message.user ?? message.bot_id ?? 'unknown',
         text: message.text ?? '',
@@ -61,12 +91,12 @@ export async function threadPrompt(client, event, body, botUserId) {
   throw new Error('This Slack thread has too many messages. Start a new @mention with the relevant link or details.');
 }
 
-function progressReporter(client, channel, ts) {
+function progressReporter(client: webApi.WebClient, channel: string, ts: string) {
   let last = 0;
-  let pending;
+  let pending: Promise<unknown> | undefined;
   let finished = false;
   return {
-    report({ tools, workflow }) {
+    report({ tools, workflow }: ProgressUpdate) {
       const now = Date.now();
       if (finished || pending || now - last < 2000) return;
       last = now;
@@ -86,14 +116,22 @@ function progressReporter(client, channel, ts) {
   };
 }
 
-export function registerSlackHandlers(app, { allowedUsers, ask }) {
-  async function respond(event, { say, client, context = {} }) {
+export function registerSlackHandlers(app: App, { allowedUsers, ask }: {
+  allowedUsers: ReadonlySet<string>;
+  ask: (prompt: string, key: string, onProgress: ProgressHandler) => Promise<PiResult>;
+}) {
+  async function respond(event: SlackRequest, { say, client, context = {} }: {
+    say: SayFn;
+    client: webApi.WebClient;
+    context?: { botUserId?: string };
+  }) {
     if (event.bot_id || event.user === context.botUserId) return;
     const { user, channel, ts, thread_ts } = event;
-    if (!allowedUsers.has(user)) {
+    if (!user || !allowedUsers.has(user)) {
       try {
         await client.reactions.add({ channel, timestamp: ts, name: 'face_with_rolling_eyes' });
-      } catch (err) {
+      } catch (caught) {
+        const err = caught as SlackError;
         if (err.data?.error !== 'already_reacted') console.error(`reactions.add failed: ${err.data?.error ?? err.message}`);
       }
       return;
@@ -106,18 +144,20 @@ export function registerSlackHandlers(app, { allowedUsers, ask }) {
       return say({ thread_ts: thread, text: 'Tell me what you need — I have access to the laptop and its skills through pi.' });
     }
 
-    const placeholder = await say({ text: '_working…_', thread_ts: thread });
-    const progress = progressReporter(client, channel, placeholder.ts);
+    // Slack returns the posted message's ts on every successful post.
+    const placeholder = (await say({ text: '_working…_', thread_ts: thread })).ts!;
+    const progress = progressReporter(client, channel, placeholder);
     try {
       const prompt = await threadPrompt(client, event, body, context.botUserId);
       const { text: reply, footer } = await ask(prompt, `${channel}:${thread}`,
         progress.report);
       await progress.finish();
-      await client.chat.update({ channel, ts: placeholder.ts, text: `${reply}\n\n${footer}` });
-    } catch (err) {
+      await client.chat.update({ channel, ts: placeholder, text: `${reply}\n\n${footer}` });
+    } catch (caught) {
+      const err = caught as SlackError;
       await progress.finish();
       console.error(`Slack request failed: ${err.data?.error ?? err.message}`);
-      await client.chat.update({ channel, ts: placeholder.ts, text: `:warning: ${err.message}` });
+      await client.chat.update({ channel, ts: placeholder, text: `:warning: ${err.message}` });
     }
   }
 

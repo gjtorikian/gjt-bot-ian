@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { ask } from "../brain.js";
+import { ask } from "../brain.ts";
 
 const run = promisify(execFile);
 
@@ -36,7 +36,7 @@ test("the configured model exists in pi's catalog", async () => {
 });
 
 // Regression guard: pi 0.84.4's anthropic provider hangs forever when stdin is
-// an open pipe. brain.js spawns with stdin ignored; if that ever regresses,
+// an open pipe. brain.ts spawns with stdin ignored; if that ever regresses,
 // this test times out instead of silently wedging Slack threads.
 test(
   "pi round-trip returns text and a cost",

@@ -1,6 +1,15 @@
+// The slice of pi's extension API this hook uses. pi loads this file with its
+// own TypeScript loader, so its packages are not dependencies of this repo.
+export interface ToolCallEvent {
+  toolName: string;
+  input: Record<string, unknown>;
+}
+
+export type ToolCallHandler = (event: ToolCallEvent) => { block: true; reason: string } | undefined;
+
 // Loaded only by this bot's one-shot pi process. Background workflows are
 // paused/aborted when print mode exits, even when the process exits with code 0.
-export default function foregroundWorkflows(pi) {
+export default function foregroundWorkflows(pi: { on(event: 'tool_call', handler: ToolCallHandler): void }) {
   pi.on('tool_call', (event) => {
     if (event.toolName === 'workflow') {
       // The extension always resumes asynchronously, ignoring background:false.

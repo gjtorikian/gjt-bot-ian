@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createPiLogger, createPiObserver } from '../pi-events.js';
+import { createPiLogger, createPiObserver } from '../pi-events.ts';
+import type { PiEvent, ProgressUpdate } from '../pi-events.ts';
 
-const assistant = (text, timestamp = 1) => ({
+const assistant = (text: string, timestamp = 1) => ({
   role: 'assistant', timestamp, model: 'parent-model', stopReason: 'stop',
   content: [{ type: 'text', text }], usage: { cost: { total: 0.25 } },
 });
-const notification = (text) => ({
+const notification = (text: string) => ({
   type: 'message_end',
   message: { role: 'custom', customType: 'subagent-notify', display: false,
     content: `Background task completed: **reviewer**\n\n${text}\n\nRetention-managed async directory: /tmp/private-run\n\nSession file: /tmp/session.jsonl` },
@@ -35,7 +36,7 @@ test('all background reports are retained until the parent supplies a final answ
 });
 
 test('tool progress is immediate and tools are counted once across event types', () => {
-  const updates = [];
+  const updates: ProgressUpdate[] = [];
   const observer = createPiObserver({ model: 'model', onProgress: (update) => updates.push(update) });
   observer.handle({ type: 'tool_execution_start', toolCallId: 'call-1', toolName: 'subagent', args: { agent: 'reviewer' } });
   assert.deepEqual(updates[0].tools, ['subagent']);
@@ -45,7 +46,7 @@ test('tool progress is immediate and tools are counted once across event types',
 });
 
 test('debug logging shows input and output deltas while hiding credentials and thinking blocks', () => {
-  const lines = [];
+  const lines: string[] = [];
   const log = createPiLogger('test-thread', {
     level: 'debug', write: (line) => lines.push(line), env: { SLACK_BOT_TOKEN: 'secret-env-token' },
   });
@@ -69,7 +70,7 @@ test('debug logging shows input and output deltas while hiding credentials and t
 });
 
 test('info logs are bounded; debug-only content and silent logs stay out of the console', () => {
-  const lines = [];
+  const lines: string[] = [];
   const log = createPiLogger('test-thread', { level: 'info', write: (line) => lines.push(line), env: {} });
   log('input', { text: 'full-context' }, true);
   log('tool.end', { text: 'x'.repeat(5000) });
@@ -92,14 +93,14 @@ test('model errors cannot be mistaken for completed answers', () => {
   assert.throws(() => observer.result(), /Provider unavailable/);
 });
 
-const workflowSnapshot = (status = 'running', history = []) => ({
+const workflowSnapshot = (status = 'running', history: Record<string, string>[] = []) => ({
   name: 'review', runId: 'review-123', currentPhase: 'Investigate',
   agents: [{ id: 1, label: 'PR reviewer', status, history }],
 });
 
 test('workflow activity is logged at info level and reaches progress without repeating snapshots', () => {
-  const logs = [];
-  const updates = [];
+  const logs: string[] = [];
+  const updates: ProgressUpdate[] = [];
   const observer = createPiObserver({ model: 'model', onProgress: (update) => updates.push(update),
     log: createPiLogger('thread', { level: 'info', env: {}, write: (line) => logs.push(line) }) });
   observer.handle({ type: 'tool_execution_start', toolName: 'workflow', toolCallId: 'call-1' });
@@ -111,7 +112,7 @@ test('workflow activity is logged at info level and reaches progress without rep
   assert.equal(logs.filter((line) => line.includes('workflow.progress')).length, 2);
   assert.match(logs.join('\n'), /PR reviewer.*running.*toolCall.*bash/);
   assert.doesNotMatch(logs.join('\n'), /private args/);
-  assert.deepEqual(updates.at(-1).workflow, { done: 1, total: 1, running: 0, errors: 0 });
+  assert.deepEqual(updates.at(-1)?.workflow, { done: 1, total: 1, running: 0, errors: 0 });
   observer.handle({ type: 'tool_execution_end', toolName: 'workflow', toolCallId: 'call-1',
     result: { details: workflowSnapshot('done') } });
   observer.handle({ type: 'message_end', message: assistant('Completed review') });
@@ -124,7 +125,7 @@ for (const [name, end] of [
   ['tool error', { isError: true, result: { content: [{ type: 'text', text: 'Request aborted' }] } }],
   ['unfinished agents', { result: { details: workflowSnapshot() } }],
   ['aborted agents', { result: { details: workflowSnapshot('skipped') } }],
-]) {
+] satisfies [string, Partial<PiEvent> | undefined][]) {
   test(`workflow ${name} cannot be hidden by a successful assistant message`, () => {
     const observer = createPiObserver({ model: 'model' });
     observer.handle({ type: 'tool_execution_start', toolName: 'workflow', toolCallId: 'call-1' });

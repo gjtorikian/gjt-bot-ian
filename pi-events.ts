@@ -1,9 +1,103 @@
-function textContent(content) {
+// pi's `--mode json` events are an external format. These types name only the
+// fields this bot reads; everything else passes through the index signatures.
+interface ContentBlock {
+  type: string;
+  text?: string;
+  id?: string;
+  [field: string]: unknown;
+}
+
+type Content = string | ContentBlock[] | null;
+
+interface WorkflowAgent {
+  id?: string | number;
+  label?: string;
+  status?: string;
+  error?: string;
+  history?: { kind?: string; toolName?: string; [field: string]: unknown }[];
+  [field: string]: unknown;
+}
+
+interface WorkflowSnapshot {
+  runId?: string;
+  name?: string;
+  currentPhase?: string;
+  background?: boolean;
+  agents?: WorkflowAgent[];
+  [field: string]: unknown;
+}
+
+interface ToolResult {
+  content?: Content;
+  // Only the workflow tool's details are read.
+  details?: WorkflowSnapshot;
+  [field: string]: unknown;
+}
+
+interface PiMessage {
+  role?: string;
+  customType?: string;
+  content?: Content;
+  timestamp?: number;
+  model?: string;
+  stopReason?: string;
+  errorMessage?: string;
+  usage?: { cost?: { total?: number } };
+  [field: string]: unknown;
+}
+
+export interface PiEvent {
+  type: string;
+  toolCallId?: string;
+  toolName?: string;
+  partialResult?: ToolResult;
+  result?: ToolResult;
+  isError?: boolean;
+  message?: PiMessage;
+  toolResults?: { toolCallId?: string; toolName?: string; name?: string }[];
+  [field: string]: unknown;
+}
+
+export interface WorkflowProgress {
+  done: number;
+  total: number;
+  running: number;
+  errors: number;
+}
+
+export interface ProgressUpdate {
+  tools: string[];
+  cost: number;
+  workflow?: WorkflowProgress;
+}
+
+export type ProgressHandler = (update: ProgressUpdate) => void;
+
+export interface PiResult {
+  text: string;
+  footer: string;
+}
+
+export type PiLogger = (event: string, details?: Record<string, unknown>, debug?: boolean) => void;
+
+export interface PiLoggerOptions {
+  level?: string;
+  write?: (line: string) => void;
+  env?: Record<string, string | undefined>;
+  isTTY?: boolean;
+}
+
+export interface PiObserver {
+  handle(event: PiEvent): void;
+  result(): PiResult;
+}
+
+function textContent(content: Content | undefined): string {
   if (typeof content === 'string') return content;
   return (content ?? []).filter((block) => block.type === 'text').map((block) => block.text).join('');
 }
 
-const EVENT_COLORS = {
+const EVENT_COLORS: Partial<Record<string, string>> = {
   start: '1;36',
   session: '2',
   agent_start: '2',
@@ -22,13 +116,13 @@ const EVENT_COLORS = {
   exit: '1;32',
 };
 
-export function createPiLogger(key, { level = process.env.BOT_LOG_LEVEL ?? 'info', write = console.log, env = process.env, isTTY = process.stdout.isTTY } = {}) {
+export function createPiLogger(key: string, { level = process.env.BOT_LOG_LEVEL ?? 'info', write = console.log, env = process.env, isTTY = process.stdout.isTTY }: PiLoggerOptions = {}): PiLogger {
   const color = env.NO_COLOR === undefined && env.FORCE_COLOR !== '0'
     && (env.FORCE_COLOR !== undefined || (isTTY && env.TERM !== 'dumb'));
-  const paint = (code, text) => color ? `\u001b[${code}m${text}\u001b[0m` : text;
+  const paint = (code: string, text: string) => color ? `\u001b[${code}m${text}\u001b[0m` : text;
   const secrets = Object.entries(env)
-    .filter(([name, value]) => /token|key|secret|password|credential/i.test(name) && value?.length >= 8)
-    .map(([, value]) => value).sort((a, b) => b.length - a.length);
+    .flatMap(([name, value]) => /token|key|secret|password|credential/i.test(name) && value && value.length >= 8 ? [value] : [])
+    .sort((a, b) => b.length - a.length);
   return (event, details = {}, debug = false) => {
     if (level === 'silent' || (debug && level !== 'debug')) return;
     let rendered = JSON.stringify(details, (name, value) => /token|api.?key|secret|password|credential/i.test(name) ? '[redacted]' : value);
@@ -46,21 +140,25 @@ export function createPiLogger(key, { level = process.env.BOT_LOG_LEVEL ?? 'info
 
 // Extension results can arrive after the assistant's last turn_end. Print mode
 // does not guarantee that background work finishes before it shuts down.
-export function createPiObserver({ model: initialModel, onProgress = () => {}, log = () => {} }) {
+export function createPiObserver({ model: initialModel, onProgress = () => {}, log = () => {} }: {
+  model: string;
+  onProgress?: ProgressHandler;
+  log?: PiLogger;
+}): PiObserver {
   let model = initialModel;
   let cost = 0;
-  let error;
+  let error: string | undefined;
   let lastAssistant = '';
-  let completions = [];
-  const seenMessages = new Set();
-  const toolIds = new Set();
-  const tools = [];
-  const partials = new Map();
-  const workflows = new Map();
-  let workflowProgress;
+  let completions: string[] = [];
+  const seenMessages = new Set<string>();
+  const toolIds = new Set<string>();
+  const tools: string[] = [];
+  const partials = new Map<string | undefined, string>();
+  const workflows = new Map<string | undefined, { signature?: string; failure?: string }>();
+  let workflowProgress: WorkflowProgress | undefined;
 
   const progress = () => onProgress({ tools: [...tools], cost, workflow: workflowProgress });
-  const workflowUpdate = (id, snapshot) => {
+  const workflowUpdate = (id: string | undefined, snapshot: WorkflowSnapshot | undefined) => {
     if (!snapshot || !Array.isArray(snapshot.agents)) return;
     const state = workflows.get(id) ?? {};
     const agents = snapshot.agents.map((agent) => {
@@ -80,11 +178,11 @@ export function createPiObserver({ model: initialModel, onProgress = () => {}, l
     log('workflow.progress', details);
     progress();
   };
-  const workflowEnd = (event) => {
+  const workflowEnd = (event: PiEvent) => {
     const details = event.result?.details;
     workflowUpdate(event.toolCallId, details);
     const runId = details?.runId ?? event.toolCallId;
-    let failure;
+    let failure: string | undefined;
     if (event.isError) failure = `Workflow ${runId} failed: ${textContent(event.result?.content)}`;
     else if (details?.background) failure = `Workflow ${runId} was left in the background. This one-shot pi process cannot complete or deliver it after exiting.`;
     else if (details?.agents?.some((agent) => agent.status !== 'done')) {
@@ -93,22 +191,24 @@ export function createPiObserver({ model: initialModel, onProgress = () => {}, l
     workflows.set(event.toolCallId, { failure });
     log(failure ? 'workflow.error' : 'workflow.complete', { id: event.toolCallId, runId, message: failure });
   };
-  const recordTool = (id, name) => {
+  const recordTool = (id: string | undefined, name: string | undefined) => {
     if (!name || (id && toolIds.has(id))) return;
     if (id) toolIds.add(id);
     tools.push(name);
     progress();
   };
-  const recordAssistant = (message) => {
+  const recordAssistant = (message: PiMessage) => {
     const text = textContent(message.content).trim();
     // message_end and turn_end carry the same completed assistant message.
+    const toolCalls = Array.isArray(message.content)
+      ? message.content.filter((block) => block.type === 'toolCall').map((block) => block.id) : undefined;
     const signature = JSON.stringify([message.timestamp, message.model, message.stopReason, text,
-      message.usage, message.content?.filter?.((block) => block.type === 'toolCall').map((block) => block.id)]);
+      message.usage, toolCalls]);
     if (seenMessages.has(signature)) return;
     seenMessages.add(signature);
     cost += message.usage?.cost?.total ?? 0;
     if (message.model) model = message.model;
-    error = ['error', 'aborted'].includes(message.stopReason)
+    error = message.stopReason === 'error' || message.stopReason === 'aborted'
       ? message.errorMessage || `Pi response ${message.stopReason}` : undefined;
     if (error) log('assistant.error', { error });
     if (text) {

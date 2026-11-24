@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import foregroundWorkflows from '../pi-workflows.js';
+import foregroundWorkflows from '../pi-workflows.ts';
+import type { ToolCallHandler } from '../pi-workflows.ts';
 
 function guard() {
-  let hook;
+  let hook!: ToolCallHandler;
   foregroundWorkflows({ on(event, handler) {
     assert.equal(event, 'tool_call');
     hook = handler;
@@ -28,6 +29,7 @@ test('both asynchronous resume routes are blocked without silently starting fres
   ]) {
     const original = structuredClone(event);
     const result = hook(event);
+    assert.ok(result);
     assert.equal(result.block, true);
     assert.match(result.reason, /cannot resume background workflows/);
     assert.deepEqual(event, original);

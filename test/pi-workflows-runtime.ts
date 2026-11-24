@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { createPiObserver } from '../pi-events.js';
+import { createPiObserver } from '../pi-events.ts';
 
 test('installed pi enforces foreground execution before the workflow tool runs', { timeout: 30_000 }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'bot-workflow-test-'));
@@ -14,8 +14,8 @@ test('installed pi enforces foreground execution before the workflow tool runs',
   const pi = spawn('pi', [
     '--print', '--mode', 'json', '--no-session', '--no-extensions', '--no-skills',
     '--no-prompt-templates', '--no-themes', '--no-builtin-tools',
-    '--extension', fileURLToPath(new URL('./fixtures/workflow-runtime.js', import.meta.url)),
-    '--extension', fileURLToPath(new URL('../pi-workflows.js', import.meta.url)),
+    '--extension', fileURLToPath(new URL('./fixtures/workflow-runtime.ts', import.meta.url)),
+    '--extension', fileURLToPath(new URL('../pi-workflows.ts', import.meta.url)),
     '--model', 'bot-test/fixture', '--thinking', 'off', '--', 'Run the test workflow',
   ], { cwd: dir, env: { ...process.env, PI_CODING_AGENT_DIR: dir, PI_OFFLINE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'] });

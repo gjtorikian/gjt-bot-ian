@@ -1,7 +1,7 @@
 import { App } from '@slack/bolt';
-import { ask } from './brain.js';
-import { registerSlackHandlers } from './slack.js';
-import { localApiClient, localApiConfig, startLocalApi } from './local-api.js';
+import { ask } from './brain.ts';
+import { registerSlackHandlers } from './slack.ts';
+import { localApiClient, localApiConfig, startLocalApi } from './local-api.ts';
 
 // Fail closed: with no allowlist configured, the bot answers nobody.
 // Everyone on this list gets full tool access to this laptop through pi.
@@ -29,10 +29,9 @@ registerSlackHandlers(app, { allowedUsers: ALLOWED, ask });
 
 await app.start();
 try {
-  const localApi = await startLocalApi({
-    config: localConfig,
-    client: localConfig ? localApiClient(process.env.SLACK_BOT_TOKEN) : undefined,
-  });
+  const localApi = await startLocalApi(localConfig
+    ? { config: localConfig, client: localApiClient(process.env.SLACK_BOT_TOKEN) }
+    : { config: null });
   if (localApi) console.log(`Local notifications: http://127.0.0.1:${localApi.address().port}/notify`);
 } catch (err) {
   await app.stop();

@@ -1,5 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { webApi } from '@slack/bolt';
 
 const HOST = '127.0.0.1';
@@ -8,7 +10,31 @@ const REQUEST_TIMEOUT_MS = 5_000;
 const RATE_WINDOW_MS = 60_000;
 const MAX_REQUESTS = 30;
 
-export function localApiClient(token, { fetch } = {}) {
+export interface LocalApiConfig {
+  port: number;
+  token: string;
+  user: string;
+}
+
+// The two Slack methods a notification needs; tests substitute their own.
+export interface NotifyClient {
+  conversations: Pick<webApi.WebClient['conversations'], 'open'>;
+  chat: Pick<webApi.WebClient['chat'], 'postMessage'>;
+}
+
+export type LocalApiOptions = { log?: (line: string) => void } & (
+  | { config: null; client?: NotifyClient }
+  | { config: LocalApiConfig; client: NotifyClient }
+);
+
+// A listening TCP server, so address() is never a pipe name or null.
+export interface LocalApiServer extends Server {
+  address(): AddressInfo;
+}
+
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+export function localApiClient(token?: string, { fetch }: Pick<webApi.WebClientOptions, 'fetch'> = {}) {
   return new webApi.WebClient(token, {
     timeout: 15_000,
     retryConfig: { retries: 0 },
@@ -19,14 +45,14 @@ export function localApiClient(token, { fetch } = {}) {
     // delivery events below, including when the rest of the bot uses debug logs.
     logger: {
       debug() {}, info() {}, warn() {}, error() {},
-      setLevel() {}, getLevel() { return 'error'; }, setName() {},
+      setLevel() {}, getLevel() { return webApi.LogLevel.ERROR; }, setName() {},
     },
   });
 }
 
 // No listener without explicit configuration. Never take a recipient from a
 // request: possession of this token grants only permission to notify this user.
-export function localApiConfig(env, allowedUsers) {
+export function localApiConfig(env: Record<string, string | undefined>, allowedUsers: ReadonlySet<string>): LocalApiConfig | null {
   const port = env.BOT_LOCAL_API_PORT;
   const token = env.BOT_LOCAL_API_TOKEN;
   const recipient = env.BOT_LOCAL_API_USER;
@@ -34,7 +60,7 @@ export function localApiConfig(env, allowedUsers) {
   if (!/^[1-9]\d{0,4}$/.test(port ?? '') || Number(port) > 65_535) {
     throw new Error('BOT_LOCAL_API_PORT must be a port from 1 to 65535.');
   }
-  if (!/^[a-f0-9]{64}$/.test(token ?? '')) {
+  if (!token || !/^[a-f0-9]{64}$/.test(token)) {
     throw new Error('BOT_LOCAL_API_TOKEN must be 32 random bytes encoded as 64 lowercase hex characters.');
   }
   const user = recipient || (allowedUsers.size === 1 ? [...allowedUsers][0] : undefined);
@@ -45,13 +71,15 @@ export function localApiConfig(env, allowedUsers) {
 }
 
 class RequestError extends Error {
-  constructor(status, message) {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
     super(message);
     this.status = status;
   }
 }
 
-function respond(res, status, body) {
+function respond(res: ServerResponse, status: number, body: object) {
   if (res.destroyed || res.writableEnded) return;
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -63,12 +91,12 @@ function respond(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
+function readBody(req: IncomingMessage) {
+  return new Promise<Json | undefined>((resolve, reject) => {
     let size = 0;
     let finished = false;
-    const chunks = [];
-    const finish = (err, result) => {
+    const chunks: Buffer[] = [];
+    const finish = (err: RequestError | null, result?: Json) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
@@ -80,7 +108,7 @@ function readBody(req) {
       if (err) reject(err);
       else resolve(result);
     };
-    const onData = (chunk) => {
+    const onData = (chunk: Buffer) => {
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
         finish(new RequestError(413, 'Request body exceeds 16384 bytes.'));
@@ -105,18 +133,19 @@ function readBody(req) {
   });
 }
 
-function escapeSlack(text) {
+function escapeSlack(text: string) {
   return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
 
-export async function startLocalApi({ config, client, log = console.log }) {
-  if (!config) return null;
+export async function startLocalApi(options: LocalApiOptions): Promise<LocalApiServer | null> {
+  if (!options.config) return null;
+  const { config, client, log = console.log } = options;
   const expectedToken = Buffer.from(config.token, 'hex');
   let busy = false;
   let windowStart = Date.now();
   let requests = 0;
 
-  const handle = async (req, res) => {
+  const handle = async (req: IncomingMessage, res: ServerResponse) => {
     let acquired = false;
     try {
       // Ignore forwarded headers. Exact Host checking also blocks DNS rebinding.
@@ -138,7 +167,7 @@ export async function startLocalApi({ config, client, log = console.log }) {
       if (req.url !== '/notify') throw new RequestError(404, 'Not found.');
       if (req.method !== 'POST') throw new RequestError(405, 'Use POST.');
       if (req.headersDistinct['content-type']?.length !== 1
-        || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'])
+        || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '')
         || req.headers['content-encoding'] !== undefined) {
         throw new RequestError(415, 'Use uncompressed application/json.');
       }
@@ -164,9 +193,10 @@ export async function startLocalApi({ config, client, log = console.log }) {
       // No pi call, commands, URLs to fetch, or user-supplied Slack arguments.
       // Use a client with retries disabled: a lost response may still mean sent.
       const dm = await client.conversations.open({ users: config.user });
-      if (!dm.ok || !/^D[A-Z0-9]+$/.test(dm.channel?.id ?? '')) throw new Error('DM unavailable');
+      const channel = dm.channel?.id ?? '';
+      if (!dm.ok || !/^D[A-Z0-9]+$/.test(channel)) throw new Error('DM unavailable');
       const message = await client.chat.postMessage({
-        channel: dm.channel.id,
+        channel,
         text: escapeSlack(body.text),
         blocks: [{ type: 'section', text: { type: 'plain_text', text: body.text, emoji: false } }],
         mrkdwn: false,
@@ -198,14 +228,14 @@ export async function startLocalApi({ config, client, log = console.log }) {
     requestTimeout: REQUEST_TIMEOUT_MS,
     connectionsCheckingInterval: 1000,
     keepAliveTimeout: 1000,
-  }, handle);
+  }, handle) as LocalApiServer;
   server.maxConnections = 16;
   server.maxRequestsPerSocket = 1;
   // Authenticate in the normal handler before reading an Expect: 100-continue body.
   server.on('checkContinue', handle);
   server.on('connect', (req, socket) => socket.destroy());
   server.on('upgrade', (req, socket) => socket.destroy());
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(config.port, HOST, () => {
       server.off('error', reject);

@@ -7,13 +7,17 @@ import { isAbsolute, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 
+// Just enough of a child process for brain.ts: two output streams and kill().
+function fakeChild() {
+  return Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(), stderr: new PassThrough(), kill: () => {},
+  });
+}
+
 test('pi starts on demand with repository skills and retains the thread session', async (t) => {
   t.mock.method(console, 'log', () => {});
   const spawn = t.mock.method(childProcess, 'spawn', () => {
-    const child = new EventEmitter();
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    child.kill = () => {};
+    const child = fakeChild();
     process.nextTick(() => {
       child.stdout.end(`${JSON.stringify({
         type: 'turn_end',
@@ -29,7 +33,7 @@ test('pi starts on demand with repository skills and retains the thread session'
     syncBuiltinESMExports();
   });
 
-  const { ask } = await import('../brain.js');
+  const { ask } = await import('../brain.ts');
   assert.equal(spawn.mock.callCount(), 0, 'importing the harness must not start pi');
 
   const first = await ask('status', 'test-channel:test-thread');
@@ -38,9 +42,9 @@ test('pi starts on demand with repository skills and retains the thread session'
   assert.equal(second.text, 'pong');
   assert.equal(spawn.mock.callCount(), 2);
 
-  const sessions = [];
+  const sessions: string[] = [];
   for (const [index, call] of spawn.mock.calls.entries()) {
-    const [command, args, options] = call.arguments;
+    const [command, args, options] = call.arguments as [string, string[], { stdio: string[] }];
     assert.equal(command, 'pi');
     assert.ok(args.includes('--print'));
     assert.equal(options.stdio[0], 'ignore');
@@ -64,13 +68,10 @@ test('pi starts on demand with repository skills and retains the thread session'
 });
 
 test('a normal pi exit cannot turn a background workflow acknowledgment into success', async (t) => {
-  const logs = [];
-  t.mock.method(console, 'log', (line) => logs.push(line));
+  const logs: string[] = [];
+  t.mock.method(console, 'log', (line: string) => logs.push(line));
   const spawn = t.mock.method(childProcess, 'spawn', () => {
-    const child = new EventEmitter();
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    child.kill = () => {};
+    const child = fakeChild();
     process.nextTick(() => {
       for (const event of [
         { type: 'tool_execution_start', toolName: 'workflow', toolCallId: 'call-1' },
@@ -87,7 +88,7 @@ test('a normal pi exit cannot turn a background workflow acknowledgment into suc
   });
   syncBuiltinESMExports();
   t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
-  const { ask } = await import('../brain.js');
+  const { ask } = await import('../brain.ts');
   await assert.rejects(ask('Review it', 'test-channel:aborted-workflow'), /radar-triage.*background/);
   assert.ok(logs.some((line) => line.includes('workflow.error')));
 });
@@ -95,10 +96,7 @@ test('a normal pi exit cannot turn a background workflow acknowledgment into suc
 test('the harness delivers a late background report without a trailing newline', async (t) => {
   t.mock.method(console, 'log', () => {});
   const spawn = t.mock.method(childProcess, 'spawn', () => {
-    const child = new EventEmitter();
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    child.kill = () => {};
+    const child = fakeChild();
     process.nextTick(() => {
       child.stdout.write(`${JSON.stringify({ type: 'turn_end', message: {
         role: 'assistant', content: [{ type: 'text', text: 'Review started.' }],
@@ -116,7 +114,7 @@ test('the harness delivers a late background report without a trailing newline',
   });
   syncBuiltinESMExports();
   t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
-  const { ask } = await import('../brain.js');
+  const { ask } = await import('../brain.ts');
   const result = await ask('Review with Astra', 'test-channel:background-thread');
   assert.equal(result.text, 'Astra review: fix looks good ✓');
 });
@@ -124,10 +122,7 @@ test('the harness delivers a late background report without a trailing newline',
 test('a failed pi process rejects even after an interim assistant message', async (t) => {
   t.mock.method(console, 'log', () => {});
   const spawn = t.mock.method(childProcess, 'spawn', () => {
-    const child = new EventEmitter();
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    child.kill = () => {};
+    const child = fakeChild();
     process.nextTick(() => {
       child.stdout.end(`${JSON.stringify({ type: 'turn_end', message: {
         content: [{ type: 'text', text: 'Working on it.' }],
@@ -139,6 +134,6 @@ test('a failed pi process rejects even after an interim assistant message', asyn
   });
   syncBuiltinESMExports();
   t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
-  const { ask } = await import('../brain.js');
+  const { ask } = await import('../brain.ts');
   await assert.rejects(ask('Review it', 'test-channel:failed-thread'), /Provider unavailable/);
 });
