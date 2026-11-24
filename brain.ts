@@ -28,8 +28,9 @@ const CWD = process.env.BOT_CWD ?? `${process.env.HOME}/Developer`;
 const SKILLS_DIR = fileURLToPath(new URL('./skills/', import.meta.url));
 const WORKFLOW_EXTENSION = fileURLToPath(new URL('./pi-workflows.ts', import.meta.url));
 const SESSION_DIR = `${process.env.HOME}/.gjt-bot-ian/sessions`;
-const TIMEOUT_MS = Number(process.env.BOT_TIMEOUT_MS ?? 15 * 60 * 1000);
 const FIRST_EVENT_MS = Number(process.env.BOT_FIRST_EVENT_MS ?? 45_000);
+// A request may run as long as it needs. Only silence ends it.
+const IDLE_MS = Number(process.env.BOT_IDLE_TIMEOUT_MS ?? 10 * 60 * 1000);
 
 mkdirSync(SESSION_DIR, { recursive: true });
 
@@ -105,26 +106,33 @@ function run(prompt: string, key: string, onProgress: ProgressHandler): Promise<
     const fail = (msg: string) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      clearTimeout(firstEvent);
+      clearTimeout(quiet);
       log('error', { message: msg, elapsedMs: Date.now() - started });
       pi.kill('SIGTERM');
       reject(new Error(msg));
     };
-    const timer = setTimeout(
-      () => fail(`pi timed out after ${Math.round(TIMEOUT_MS / 1000)}s`), TIMEOUT_MS);
 
     // A model pi cannot actually reach produces no output at all, forever.
     // Don't let that wedge the thread — surface it.
-    let firstEvent: NodeJS.Timeout | undefined = setTimeout(
+    let quiet = setTimeout(
       () => fail(`pi produced no output in ${Math.round(FIRST_EVENT_MS / 1000)}s using model ${MODEL}. ` +
         'Check that model outside Slack, or change BOT_MODEL in .env.'), FIRST_EVENT_MS);
+    // Every event restarts the timer, so a long run is never cut off while pi
+    // is still reporting. pi streams model output and whatever a tool prints;
+    // a tool that prints nothing for IDLE_MS looks the same as a hung pi.
+    const heard = () => {
+      clearTimeout(quiet);
+      quiet = setTimeout(
+        () => fail(`pi reported nothing for ${Math.round(IDLE_MS / 1000)}s and was stopped. ` +
+          'Reply in this thread to continue. If a tool is meant to run silent that long, raise BOT_IDLE_TIMEOUT_MS in .env.'),
+        IDLE_MS);
+    };
 
     const handleLine = (line: string) => {
       if (settled || !line.trim()) return;
       let event: PiEvent;
       try { event = JSON.parse(line); } catch { log('stdout', { text: line }, true); return; }
-      if (firstEvent) { clearTimeout(firstEvent); firstEvent = undefined; }
+      heard();
       observer.handle(event);
     };
     pi.stdout.setEncoding('utf8');
@@ -142,12 +150,12 @@ function run(prompt: string, key: string, onProgress: ProgressHandler): Promise<
     });
     pi.on('error', (err) => fail(err.message));
     pi.on('close', (code, signal) => {
-      clearTimeout(timer);
-      clearTimeout(firstEvent);
       log('exit', { code, signal, elapsedMs: Date.now() - started });
       if (settled) return;
       // A final JSON event need not end in a newline.
       handleLine(buf);
+      // After that last line: it restarts the timer like any other event.
+      clearTimeout(quiet);
       if (code !== 0) {
         return fail(stderr.trim().split('\n').slice(-3).join('\n') || `pi exited ${signal || code}`);
       }

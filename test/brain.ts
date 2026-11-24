@@ -139,6 +139,82 @@ test('the harness delivers a late background report without a trailing newline',
   assert.equal(result.text, 'Astra review: fix looks good ✓');
 });
 
+// Lets ask() start pi, and lets written events reach the harness.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const MINUTE = 60_000;
+
+test('a run that keeps reporting events is never cut off for taking long', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = Object.assign(fakeChild(), { kill: t.mock.fn() });
+  const spawn = t.mock.method(childProcess, 'spawn', () => child);
+  syncBuiltinESMExports();
+  t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
+  const { ask } = await import('../brain.ts');
+
+  let outcome: string | undefined;
+  const answer = ask('Babysit the PR', 'test-channel:long-run');
+  answer.then(() => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
+  await settle();
+
+  // Two hours of work, with nine quiet minutes between events.
+  for (let elapsed = 0; elapsed < 120 * MINUTE; elapsed += 9 * MINUTE) {
+    child.stdout.write(`${JSON.stringify({ type: 'tool_execution_update', toolName: 'bash', toolCallId: 'call-1',
+      partialResult: { content: [{ type: 'text', text: 'in_progress' }] } })}\n`);
+    await settle();
+    t.mock.timers.tick(9 * MINUTE);
+  }
+  await settle();
+  assert.equal(outcome, undefined, 'the run must still be going');
+  assert.equal(child.kill.mock.callCount(), 0);
+
+  child.stdout.end(`${JSON.stringify({ type: 'turn_end', message: { content: [{ type: 'text', text: 'merged' }] } })}\n`);
+  await settle();
+  child.emit('close', 0);
+  assert.equal((await answer).text, 'merged');
+
+  // The finished run leaves no timer behind to fire later.
+  t.mock.timers.tick(60 * MINUTE);
+  assert.equal(child.kill.mock.callCount(), 0);
+});
+
+test('a pi that stops reporting events is stopped', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = Object.assign(fakeChild(), { kill: t.mock.fn() });
+  const spawn = t.mock.method(childProcess, 'spawn', () => child);
+  syncBuiltinESMExports();
+  t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
+  const { ask } = await import('../brain.ts');
+
+  const answer = ask('Review it', 'test-channel:silent-run');
+  await settle();
+  child.stdout.write(`${JSON.stringify({ type: 'agent_start' })}\n`);
+  await settle();
+
+  t.mock.timers.tick(10 * MINUTE - 1);
+  assert.equal(child.kill.mock.callCount(), 0, 'ten quiet minutes are allowed');
+  t.mock.timers.tick(1);
+  await assert.rejects(answer, /reported nothing for 600s.*BOT_IDLE_TIMEOUT_MS/);
+  assert.deepEqual(child.kill.mock.calls.map((call) => call.arguments), [['SIGTERM']]);
+});
+
+test('a pi that never reports an event is stopped early', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = Object.assign(fakeChild(), { kill: t.mock.fn() });
+  const spawn = t.mock.method(childProcess, 'spawn', () => child);
+  syncBuiltinESMExports();
+  t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
+  const { ask } = await import('../brain.ts');
+
+  const answer = ask('Review it', 'test-channel:unreachable-model');
+  await settle();
+  t.mock.timers.tick(45_000);
+  await assert.rejects(answer, /no output in 45s using model test-provider\/test-model/);
+  assert.equal(child.kill.mock.callCount(), 1);
+});
+
 test('a failed pi process rejects even after an interim assistant message', async (t) => {
   t.mock.method(console, 'log', () => {});
   const spawn = t.mock.method(childProcess, 'spawn', () => {

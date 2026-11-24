@@ -17,8 +17,13 @@ At `BOT_LOG_LEVEL=info`, `workflow.progress` logs show the phase, agent states,
 and tool activity; `workflow.complete` or `workflow.error` records the outcome.
 Slack progress shows the completed/running agent counts. A background launch,
 unfinished workflow, or failed agent produces an error even if pi exits with
-code 0. Requests remain subject to `BOT_TIMEOUT_MS` (default: 15 minutes).
-Restart `npm start` after changing the bot's code.
+code 0. Restart `npm start` after changing the bot's code.
+
+A request has no time limit. The bot stops pi only when it has reported no
+event for `BOT_IDLE_TIMEOUT_MS` (default: 10 minutes). Model output and anything
+a tool prints count as events, so a long request keeps running while it makes
+progress. A command that prints nothing for that long is stopped as if pi had
+hung; replying in the same thread continues from the saved session.
 
 ## Local notifications
 
