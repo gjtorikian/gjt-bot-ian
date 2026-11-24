@@ -17,14 +17,21 @@ one card per link:
 
 - An issue becomes a **draft**. A draft does nothing until Garen approves it on
   the board.
-- A pull request becomes a **review card**. It waits in the Judging column,
-  where a review is started from the card (its Review PR button) or done by
-  hand. Adding the card does not start one.
+- A pull request becomes a **review card** in the Judging column. What
+  happens to it next depends on what the user asked for:
+  - Only to add it: the board reviews it on its own, one pull request at a
+    time, changes nothing on GitHub, and keeps the findings on the card.
+  - Work on it (fix it, check it against something, watch its checks, merge
+    it, comment on it): send what they asked as `instructions` with the links.
+    The card then runs as work on the board, where every step shows.
 
-A request to add issues or pull requests authorizes creating those cards and
-nothing else. It does not authorize approving, editing, or deleting cards.
-Adding a pull request is not a review of it: do not approve, comment on, label,
-or merge anything on GitHub as part of this. Do not create cards by any other
+The board does the work, not you. Whatever the user asks for beyond adding the
+cards goes to the board as `instructions` (see below). Do none of it yourself,
+even though you could: no reviewing, no pushing, no approving, no merging, no
+commenting on GitHub. Work done from here leaves nothing on the board to look
+at, and the board would then do it a second time. A request to add cards does
+not authorize approving, editing, or deleting cards. Do not create cards by
+any other
 route (workgraph tools, `gh issue create`, writing to a store): the endpoint is
 what records where each card came from and keeps a repeat from making a second
 one.
@@ -107,23 +114,67 @@ The reply is JSON:
 
 - `created`: the new cards (`id`, `title`). A review card's title starts with
   `Review PR #`; the rest are drafts.
+- `started`: the ids of the pull request cards that were given your
+  `instructions` and are now running as work. Empty when you sent none.
 - `skipped`: links that already have a card in that repo, closed cards
   included. This is normal on a repeat. Never send `"force": true` unless the
   user explicitly asks for a second card for the same link.
+- `existing`: the card each skipped link already has (`ref`, `id`).
 - `notes`: degradations worth passing on, such as a missing API key.
 - `{"error": "..."}` instead: nothing was created. Report the message; it names
   the link at fault. Sending the same request again is safe.
+
+## When the user asks for work on the pull requests
+
+Put what they asked for in the same request, as `instructions`:
+
+```sh
+board="${PWUI_URL:-http://127.0.0.1:4517}"
+printf '%s\n' "$link_one" "$link_two" |
+  jq -Rn --arg instructions "$instructions" \
+    '{urls: [inputs], instructions: $instructions}' |
+  curl -sS -X POST "$board/api/projects/$id/import" \
+    -H 'content-type: application/json' -d @-
+```
+
+- Keep the user's own words for what they want, with every condition they
+  gave ("ensure CI is green, then merge", "post a comment saying thanks"). A
+  run merges or comments only when the instructions say so in so many words,
+  so do not add such a step and do not drop one.
+- Whoever reads the instructions has none of this conversation. Replace
+  anything only you can resolve ("the monorepo", "the usual checks") with what
+  it points to: a repository, a path, a link.
+- Instructions reach new pull request cards only. A draft never gets them: an
+  issue waits for Garen's approval. Say so if the user expected otherwise.
+- A link listed in `existing` already had a card, so the board left it alone.
+  If the request is about that pull request too, send its card a follow-up,
+  once:
+
+  ```sh
+  jq -n --arg instructions "$instructions" '{instructions: $instructions}' |
+    curl -sS -X POST "$board/api/projects/$id/issues/$card/follow-up" \
+      -H 'content-type: application/json' -d @-
+  ```
+
+  A follow-up restarts whatever that card was doing. Never send one twice for
+  the same request, and send none for a pull request that is already merged or
+  closed (`gh pr view "$link" --json state`); say that it is instead.
 
 ## Sweeping more than one repo
 
 Only when the user asks for several repos or all of them. Do one repo at a
 time, one request each, and skip repos where `gh` finds no GitHub repository.
 Before sweeping every watched repo, tell the user how many cards that would be
-in total and wait for a yes: it can be a lot.
+in total and wait for a yes: it can be a lot, and every pull request card
+starts a review.
 
 ## Report
 
 Say, per repo, how many drafts and how many review cards were added and how
 many links were already on the board. List the new titles when there are ten or
 fewer. The cards are at `$board/#/board/<id>`. Do not claim anything was
-approved, reviewed, or started: importing only creates cards.
+approved or reviewed: importing only creates cards. For pull requests you only
+added, say that the board will review them one at a time and that the findings
+will be on each card. For pull requests you sent instructions for, say that the
+board has started work on them and that its progress shows on each card. Never
+report an outcome (fixed, merged, commented) that you did not see.
