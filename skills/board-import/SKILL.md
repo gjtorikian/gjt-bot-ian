@@ -1,6 +1,6 @@
 ---
 name: board-import
-description: Put GitHub issues and pull requests on the pi-workgraph board through its import endpoint. Issues become drafts; pull requests become review cards. Use when the user asks to add, import, pull in, queue, or sweep a repo's issues or pull requests (for example "add the issues in emulate" or "put emulate's open PRs up for review"), or to put specific issue, pull request, Linear, or Slack links on the board.
+description: Work with the pi-workgraph board. Put GitHub issues and pull requests on it (issues become drafts; pull requests become review cards), hand it work on a pull request, and read what it found. Use when the user asks to add, import, pull in, queue, or sweep a repo's issues or pull requests (for example "add the issues in emulate" or "put emulate's open PRs up for review"); asks for anything to be done to a pull request (review, fix, babysit, approve, merge, comment); asks what the board is doing or found; or replies to a message that begins "The board needs you".
 ---
 
 # Put work on the board
@@ -35,6 +35,58 @@ any other
 route (workgraph tools, `gh issue create`, writing to a store): the endpoint is
 what records where each card came from and keeps a repeat from making a second
 one.
+
+## Look at the board before you touch a pull request
+
+Before you review, push to, approve, merge, or comment on any pull request,
+find out whether the board has a card for it:
+
+```sh
+board="${PWUI_URL:-http://127.0.0.1:4517}"
+curl -sS "$board/api/work" |
+  jq --arg link "$link" '.issues[]
+    | select(.metadata.pwui_source_url == $link)
+    | {projectId, id, title, status, phase, review: .metadata.pwui_review_state}'
+```
+
+- A card exists: the board owns that pull request. Do not act on it from here.
+  Tell the user what the card says, and if they want something done, send the
+  card a follow-up (below).
+- No card: put the pull request on the board with the user's request as
+  `instructions`, as described below. The only work on a pull request you do
+  yourself is work the user asks for after you have told them the board is not
+  reachable.
+
+## What the board found
+
+The cards that need the user, each with what to do next and, for a finished
+review, its findings:
+
+```sh
+curl -sS "$board/api/attention" |
+  jq -r '.[] | "\(.kind)\t\(.project)\t\(.id)\t\(.title)\n\(.next)\n\(.detail // "")\n"'
+```
+
+Use it to answer "what needs me", "did the review finish", or "what did it
+find". Report what the board says, in its words; do not re-review the pull
+request to answer. A `kind` of `review-ready` has the findings in `detail`,
+and `decision` has the question a run is waiting on.
+
+A message from this bot that begins "The board needs you" came from that
+list. It ends with the card's address, `…/#/issue/<repo id>/<card id>`. When
+the user replies to it asking for something ("fix that, then merge"), send
+their words to that card as a follow-up, once:
+
+```sh
+jq -n --arg instructions "$instructions" '{instructions: $instructions}' |
+  curl -sS -X POST "$board/api/projects/$id/issues/$card/follow-up" \
+    -H 'content-type: application/json' -d @-
+```
+
+The run that follows is given the review's findings by the board, so do not
+copy them into the instructions. A card that is waiting on a `decision` takes
+no follow-up: a decision is answered on the card itself, where the question is
+shown. Tell the user that, with the card's address.
 
 ## Find the repo
 

@@ -2,6 +2,7 @@ import { App } from '@slack/bolt';
 import { ask } from './brain.ts';
 import { registerSlackHandlers } from './slack.ts';
 import { localApiClient, localApiConfig, startLocalApi } from './local-api.ts';
+import { boardWatchConfig, createBoardWatch } from './board-watch.ts';
 
 // Fail closed: with no allowlist configured, the bot answers nobody.
 // Everyone on this list gets full tool access to this laptop through pi.
@@ -13,6 +14,7 @@ if (ALLOWED.size === 0) {
   process.exit(1);
 }
 const localConfig = localApiConfig(process.env, ALLOWED);
+const boardConfig = boardWatchConfig(process.env, ALLOWED);
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -36,5 +38,9 @@ try {
 } catch (err) {
   await app.stop();
   throw err;
+}
+// The board is asked, never told: it knows nothing about this bot.
+if (boardConfig) {
+  createBoardWatch({ config: boardConfig, client: localApiClient(process.env.SLACK_BOT_TOKEN) }).start();
 }
 console.log(`⚡️ gjt-bot-ian connected — allowlist: ${[...ALLOWED].join(', ')}`);

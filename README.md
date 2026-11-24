@@ -25,6 +25,28 @@ a tool prints count as events, so a long request keeps running while it makes
 progress. A command that prints nothing for that long is stopped as if pi had
 hung; replying in the same thread continues from the saved session.
 
+## Board watch
+
+The bot asks the pi-workgraph board which cards need you, once a minute, and
+sends you a DM when a card newly does: a pull request review is ready or did
+not finish, a run asked a question or gave up, a plan waits for approval, or
+finished work has a pull request to merge. The board does the work and knows
+nothing about this bot; the bot only asks (`GET /api/attention`).
+
+The message is plain text and ends with the card's address. Reply in its
+thread to have something done about it: the board-import skill sends your
+reply to that card as a follow-up, and the board runs it.
+
+- Starting the bot announces nothing that already needed you. What it has told
+  you is kept in `~/.gjt-bot-ian/board-seen.json`, so a restart does not repeat
+  it.
+- A board that is not running is not an error. The bot says so once in its log
+  and keeps asking.
+- `PWUI_URL` is the board's address (default `http://127.0.0.1:4517`).
+  `BOT_BOARD_POLL_MS` sets how often to ask; `0` turns the watch off. With more
+  than one person in `SLACK_ALLOWED_USERS`, set `BOT_BOARD_USER` to the one who
+  hears from the board.
+
 ## Local notifications
 
 A trusted process on the laptop can send `POST http://127.0.0.1:3210/notify` to
