@@ -13,8 +13,16 @@ import type { PiEvent, PiResult, ProgressHandler } from './pi-events.ts';
 //   2. pi 0.84.4's anthropic provider blocks forever, with no output on stdout
 //      OR stderr, if stdin is an open pipe. That is why the spawn below passes
 //      stdio 'ignore' for stdin. Do not change it to 'pipe'.
-const MODEL = process.env.BOT_MODEL ?? 'anthropic/claude-opus-5';
-const THINKING = process.env.BOT_THINKING ?? 'medium';
+
+// The model and thinking level come only from .env. There is no default in
+// code, so a missing value stops the bot at startup.
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} is not set. Add it to .env (see .env.example) and restart.`);
+  return value;
+}
+const MODEL = requiredEnv('BOT_MODEL');
+const THINKING = requiredEnv('BOT_THINKING');
 const CWD = process.env.BOT_CWD ?? `${process.env.HOME}/Developer`;
 // Anchor skills to this repo, even when pi works in a different directory.
 const SKILLS_DIR = fileURLToPath(new URL('./skills/', import.meta.url));
@@ -73,7 +81,7 @@ function run(prompt: string, key: string, onProgress: ProgressHandler): Promise<
   const started = Date.now();
   const args = [
     '--print', '--mode', 'json',
-    ...(MODEL ? ['--model', MODEL] : []),
+    '--model', MODEL,
     '--thinking', THINKING,
     '--session-id', sessionId(key),
     '--session-dir', SESSION_DIR,
@@ -87,8 +95,8 @@ function run(prompt: string, key: string, onProgress: ProgressHandler): Promise<
     // Start pi for each request; --print exits when the request is complete.
     // stdin MUST be 'ignore' (/dev/null), not 'pipe' — see gotcha 2 above.
     const pi = spawn('pi', args, { cwd: CWD, stdio: ['ignore', 'pipe', 'pipe'] });
-    const observer = createPiObserver({ model: MODEL || '(pi default)', onProgress, log });
-    log('start', { pid: pi.pid, model: MODEL || '(pi default)', cwd: CWD, skills: SKILLS_DIR, session: sessionId(key) });
+    const observer = createPiObserver({ model: MODEL, onProgress, log });
+    log('start', { pid: pi.pid, model: MODEL, cwd: CWD, skills: SKILLS_DIR, session: sessionId(key) });
     log('input', { prompt, systemPrompt: SYSTEM }, true);
     let stderr = '';
     let buf = '';
@@ -109,8 +117,8 @@ function run(prompt: string, key: string, onProgress: ProgressHandler): Promise<
     // A model pi cannot actually reach produces no output at all, forever.
     // Don't let that wedge the thread — surface it.
     let firstEvent: NodeJS.Timeout | undefined = setTimeout(
-      () => fail(`pi produced no output in ${Math.round(FIRST_EVENT_MS / 1000)}s using model ${MODEL || '(pi default)'}. ` +
-        'Check that model outside Slack, or set BOT_MODEL= to use pi\'s default.'), FIRST_EVENT_MS);
+      () => fail(`pi produced no output in ${Math.round(FIRST_EVENT_MS / 1000)}s using model ${MODEL}. ` +
+        'Check that model outside Slack, or change BOT_MODEL in .env.'), FIRST_EVENT_MS);
 
     const handleLine = (line: string) => {
       if (settled || !line.trim()) return;

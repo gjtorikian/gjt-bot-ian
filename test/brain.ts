@@ -6,6 +6,12 @@ import { syncBuiltinESMExports } from 'node:module';
 import { isAbsolute, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+// brain.ts requires its model settings at import; these tests supply their own.
+process.env.BOT_MODEL = 'test-provider/test-model';
+process.env.BOT_THINKING = 'low';
 
 // Just enough of a child process for brain.ts: two output streams and kill().
 function fakeChild() {
@@ -49,6 +55,8 @@ test('pi starts on demand with repository skills and retains the thread session'
     assert.ok(args.includes('--print'));
     assert.equal(options.stdio[0], 'ignore');
     assert.deepEqual(args.slice(args.indexOf('--') + 1), [index === 0 ? 'status' : 'follow up']);
+    assert.equal(args[args.indexOf('--model') + 1], 'test-provider/test-model', 'the model must come from the environment');
+    assert.equal(args[args.indexOf('--thinking') + 1], 'low', 'the thinking level must come from the environment');
 
     const skillFlag = args.indexOf('--skill');
     assert.ok(skillFlag >= 0, 'each request must load the repository skills');
@@ -66,6 +74,18 @@ test('pi starts on demand with repository skills and retains the thread session'
   assert.match(sessions[0], /^[a-f0-9-]{36}$/);
   assert.equal(sessions[0], sessions[1]);
 });
+
+for (const name of ['BOT_MODEL', 'BOT_THINKING']) {
+  test(`the harness refuses to load when ${name} is missing or empty`, async () => {
+    const harness = fileURLToPath(new URL('../brain.ts', import.meta.url));
+    for (const value of [undefined, '']) {
+      await assert.rejects(
+        promisify(childProcess.execFile)(process.execPath, [harness], { env: { ...process.env, [name]: value } }),
+        new RegExp(`${name} is not set`),
+      );
+    }
+  });
+}
 
 test('a normal pi exit cannot turn a background workflow acknowledgment into success', async (t) => {
   const logs: string[] = [];

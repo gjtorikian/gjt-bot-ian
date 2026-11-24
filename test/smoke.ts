@@ -4,7 +4,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { ask } from "../brain.ts";
+
+// These checks cover this laptop's real setup, so they read the bot's own .env.
+// If the file is missing, the model test below reports it.
+try {
+  process.loadEnvFile(new URL("../.env", import.meta.url));
+} catch {}
 
 const run = promisify(execFile);
 
@@ -25,9 +30,9 @@ test("pi holds a ready anthropic credential", async () => {
 });
 
 test("the configured model exists in pi's catalog", async () => {
-  const [provider, model] = (
-    process.env.BOT_MODEL ?? "anthropic/claude-opus-5"
-  ).split("/");
+  const configured = process.env.BOT_MODEL;
+  assert.ok(configured, "BOT_MODEL is not set in .env");
+  const [provider, model] = configured.split("/");
   const { stdout } = await run("pi", ["--list-models", provider]);
   assert.ok(
     stdout.split("\n").some((l) => l.split(/\s+/)[1] === model),
@@ -42,6 +47,8 @@ test(
   "pi round-trip returns text and a cost",
   { skip: !process.env.BOT_LIVE_TEST },
   async () => {
+    // Import after .env is loaded: brain.ts requires its model settings.
+    const { ask } = await import("../brain.ts");
     const { text, footer } = await ask(
       "Reply with exactly: pong",
       `smoke:${Date.now()}`,
